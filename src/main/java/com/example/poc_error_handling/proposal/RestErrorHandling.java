@@ -32,6 +32,7 @@ public class RestErrorHandling {
         mapProperties.put("new-key-01", "new-value-01");
         mapProperties.put("new-key-02", "new-value-02");
         mapProperties.put("new-key-03", "new-value-03");
+        problemDetail.setProperties(mapProperties);
         problemDetail.setProperty("traceid", tracer.currentSpan().context().traceIdString());
         return problemDetail;
     }
