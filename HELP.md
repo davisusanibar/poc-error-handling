@@ -1,29 +1,106 @@
-# Read Me First
-The following was discovered as part of building this project:
+# PoC Manejo De Detalle Problemas APIs HTTP
 
-* The original package name 'com.example.poc-error-handling' is invalid and this project uses 'com.example.poc_error_handling' instead.
+Esta PoC se basa en probar el RFC 9457 `Problem Details for HTTP APIs` detallado en <a href="https://datatracker.ietf.org/doc/html/rfc9457">RFC 9457</a>
 
-# Getting Started
+# Primeros Pasos
 
-### Reference Documentation
-For further reference, please consider the following sections:
+## Problema
 
-* [Official Apache Maven documentation](https://maven.apache.org/guides/index.html)
-* [Spring Boot Maven Plugin Reference Guide](https://docs.spring.io/spring-boot/3.3.3/maven-plugin)
-* [Create an OCI image](https://docs.spring.io/spring-boot/3.3.3/maven-plugin/build-image.html)
-* [Spring Web](https://docs.spring.io/spring-boot/docs/3.3.3/reference/htmlsingle/index.html#web)
+El problema que teniamos antes del RFC 9457 es que cada uno define de manera particular los campos/atributos/detalles
+que uno definira como payload para la respuesta con el detalle del problema.
 
-### Guides
-The following guides illustrate how to use some features concretely:
+## Propuesta Solucion Spring Framework
 
-* [Building a RESTful Web Service](https://spring.io/guides/gs/rest-service/)
-* [Serving Web Content with Spring MVC](https://spring.io/guides/gs/serving-web-content/)
-* [Building REST services with Spring](https://spring.io/guides/tutorials/rest/)
+El RFC 9457 define como linea base los siguientes atributos:
+- type
+- title
+- status
+- detail
+- instance
+- extensions (properties)
 
-### Maven Parent overrides
+![img.png](img/spring-problem-detail.png)
 
-Due to Maven's design, elements are inherited from the parent POM to the project POM.
-While most of the inheritance is fine, it also inherits unwanted elements like `<license>` and `<developers>` from the parent.
-To prevent this, the project POM contains empty overrides for these elements.
-If you manually switch to a different parent and actually want the inheritance, you need to remove those overrides.
+## Implementacion
 
+### Integracion para Tracer 
+
+Si bien con el RFC 9457 `Problem Details for HTTP APIs` se detalla el contrato comun, para casos de manejo de Trace 
+este proyecto usa `micrometer-tracing-bridge-brave` mediante:
+
+```java
+private final Tracer tracer;
+
+final ProblemDetail problemDetail =
+        ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+problemDetail.setProperty("traceid", tracer.currentSpan().context().traceIdString());
+```
+
+### Manejo de Propagaciones de Variables de Negocio
+
+Aegregamos las correlacion de las propagaciones mediante:
+
+```properties
+management.tracing.enabled=true
+management.tracing.sampling.probability=1.0
+management.tracing.baggage.correlation.enabled=true
+management.tracing.baggage.correlation.fields=idToPropagate01, idToPropagate02
+management.tracing.baggage.remote-fields=idToPropagate01, idToPropagate02
+```
+
+La propagacion de variables de negocio la definimos mediante:
+
+```java
+@Bean
+public CurrentTraceContext.ScopeDecorator mdcScopeDecorator(
+        @Qualifier("idToPropagate01") BaggageField idToPropagate01,
+        @Qualifier("idToPropagate02") BaggageField idToPropagate02) {
+    return MDCScopeDecorator.newBuilder()
+            .clear()
+            .add(
+                CorrelationScopeConfig.SingleCorrelationField.newBuilder(idToPropagate01)
+                        .flushOnUpdate()
+                        .build())
+            .add(
+                CorrelationScopeConfig.SingleCorrelationField.newBuilder(idToPropagate02)
+                        .flushOnUpdate()
+                        .build())
+            .build();
+}
+```
+
+Y la actualizamos mediante:
+
+```java
+    @NonNull
+    @Qualifier("idToPropagate02")
+    private final BaggageField idToPropagate02; // information that we need to propagate
+
+    @GetMapping("/testme")
+    public List<String> callMe() {
+        idToPropagate02.updateValue("id-propagate-0002");
+        log.info("Proceso /testme");
+        return List.of("Uno", "Dos", tracer.currentSpan().context().traceIdString());
+    }
+```
+
+Y lo escribimos mediante:
+```lombok.config
+<configuration>
+    <springProperty scope="context" name="service" source="spring.application.name"/>
+    <property scope="context" name="hostname" value="${HOSTNAME}"/>
+    <appender name="console" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <timeZone>UTC</timeZone>
+            <includeMdcKeyName>traceId</includeMdcKeyName>
+            <includeMdcKeyName>idToPropagate01</includeMdcKeyName>
+            <includeMdcKeyName>idToPropagate02</includeMdcKeyName>
+            <includeContext>false</includeContext> <!--To exclude HOSTNAME -->
+            <customFields>{"hostname":"${HOSTNAME}","service":"${service}"}</customFields>
+        </encoder>
+    </appender>
+    <root level="info">
+        <appender-ref ref="console"/>
+    </root>
+</configuration>
+```
